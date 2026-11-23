@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS deck_cards (
     physical INTEGER NOT NULL DEFAULT 0,    -- 1 = Karte liegt physisch im Deck (z. B. aus eigenem Precon)
     PRIMARY KEY (deck_id, name, section)
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at REAL
+);
 CREATE TABLE IF NOT EXISTS history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     deck_id INTEGER NOT NULL,
@@ -74,9 +79,29 @@ def db():
 def init():
     with db() as con:
         con.executescript(SCHEMA)
-        cols = {r["name"] for r in con.execute("PRAGMA table_info(deck_cards)")}
-        if "physical" not in cols:
-            con.execute("ALTER TABLE deck_cards ADD COLUMN physical INTEGER NOT NULL DEFAULT 0")
+        _add_columns(con, "deck_cards", {"physical": "INTEGER NOT NULL DEFAULT 0", "role": "TEXT", "note": "TEXT"})
+        _add_columns(con, "decks", {"plan": "TEXT", "archetype": "TEXT", "wizard_step": "TEXT", "mode": "TEXT DEFAULT 'free'",
+                                    "table_notes": "TEXT"})
+
+
+def _add_columns(con, table, cols):
+    have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+    for name, typ in cols.items():
+        if name not in have:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+
+
+def meta_get(key, default=None):
+    import json
+    with db() as con:
+        r = con.execute("SELECT value, updated_at FROM meta WHERE key=?", (key,)).fetchone()
+    return (json.loads(r["value"]), r["updated_at"]) if r else (default, 0)
+
+
+def meta_set(key, value):
+    import json
+    with db() as con:
+        con.execute("INSERT OR REPLACE INTO meta(key, value, updated_at) VALUES (?,?,?)", (key, json.dumps(value), time.time()))
 
 
 def now():

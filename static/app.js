@@ -31,7 +31,7 @@ function renderLogin() {
 // ---------- Decks ----------
 async function renderDecks() {
   const [decks, precons] = await Promise.all([api("/api/decks"), api("/api/precons")]);
-  view.innerHTML = `<div class="row"><h1>Deine Decks</h1><span class="spacer"></span><button id="new" class="primary">+ Neues Deck</button></div>
+  view.innerHTML = `<div class="row"><h1>Deine Decks</h1><span class="spacer"></span><a class="btn primary" href="#coach">🎓 Neues Deck mit Coach</a><button id="new">+ Liste einfügen</button></div>
     <div class="grid">${decks.map((d) => `<div class="panel deckcard" data-id="${d.id}"><b>${esc(d.name)}</b>
       <div class="muted small">${esc(d.commander || "kein Commander")}</div>
       <div class="row small" style="margin-top:.4rem"><span class="badge">${d.cards || 0}/100</span><span class="badge">Bracket ${d.bracket}</span><span class="badge">Budget ${eur(d.budget_eur)}</span></div></div>`).join("") || '<p class="muted">Noch keine Decks.</p>'}</div>
@@ -85,6 +85,7 @@ async function renderDeck(id) {
           <label style="margin:0">Ziel-Bracket</label><select id="br">${[1, 2, 3, 4, 5].map((b) => `<option ${b == d.bracket ? "selected" : ""}>${b}</option>`).join("")}</select>
           <label style="margin:0">Budget €</label><input id="bu" type="number" value="${d.budget_eur}" style="width:5.5rem">
         </div></div></div>
+    <div class="row" style="margin-top:.6rem"><a class="btn primary" href="#wiz-${id}">🎓 Mit dem Coach durchgehen</a></div>
     <div class="tabs">${[["cards", "Karten"], ["analysis", "Analyse"], ["advisor", "🧠 Berater"], ["shop", "🛒 Einkauf"], ["more", "Mehr"]].map(([k, l]) => `<button data-tab="${k}" class="${k === DECKTAB ? "active" : ""}">${l}</button>`).join("")}</div>
     <div id="tab"></div>`;
   $("#br").onchange = async (e) => { await api(`/api/decks/${id}`, { method: "PATCH", body: { bracket: +e.target.value } }); renderDeck(id); };
@@ -115,7 +116,7 @@ function tabCards(id) {
       ${groups[g].sort((a, b) => (a.cmc - b.cmc) || a.name.localeCompare(b.name)).map((c) => `<div class="cardline">
         <span class="small muted" style="width:1.6rem">${c.qty > 1 ? c.qty + "×" : ""}</span>
         <span class="name" data-img="${esc(c.image)}">${esc(c.name)}</span>
-        <span class="small muted">${esc(c.mana_cost || "")}</span>${cardBadges(c)}
+        <span class="small muted">${esc(c.mana_cost || "")}</span>${c.role && KNOW ? `<span class="badge">${esc(KNOW.roles[c.role] || c.role)}</span>` : ""}${cardBadges(c)}
         ${c.section !== "commander" ? `<button class="mini" data-del="${esc(c.name)}" data-sec="${c.section}">✕</button>` : ""}</div>`).join("")}</div>`).join("")}`;
   autocomplete($("#addc"), $("#ac2"));
   $("#addb").onclick = (e) => busy(e.target, async () => { const r = await api(`/api/decks/${id}/cards`, { method: "POST", body: { name: $("#addc").value, section: $("#adds").value } }); toast(r.name + " hinzugefügt"); renderDeck(id); });
@@ -126,7 +127,7 @@ function tabCards(id) {
 function tabAnalysis(id) {
   const a = DECK.analysis;
   const max = Math.max(1, ...Object.values(a.curve));
-  const labels = { lands: "Länder", ramp: "Ramp", draw: "Kartenvorteil", removal: "Removal", wipe: "Brettwischer", protection: "Schutz" };
+  const labels = { lands: "Länder", ramp: "Ramp", draw: "Kartenvorteil", removal: "Removal", wipe: "Brettwischer", protection: "Schutz", wincon: "Wincons" };
   const meter = (k) => { const v = a.counts[k] ?? 0, [lo, hi] = a.targets[k], scale = hi * 1.4;
     const cls = v < lo ? "low" : v > hi ? "high" : "";
     return `<div class="meter"><span>${labels[k]}</span><div class="bar"><b style="left:${(lo / scale) * 100}%;width:${((hi - lo) / scale) * 100}%"></b><i class="${cls}" style="width:${Math.min(100, (v / scale) * 100)}%"></i></div><span>${v} <span class="muted small">/${lo}–${hi}</span></span></div>`; };
@@ -251,12 +252,18 @@ async function route() {
     STATUS = await api("/api/status");
     if (!STATUS.logged_in) return renderLogin();
     const h = location.hash.slice(1) || "decks";
-    document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.getAttribute("href") === "#" + h.split("-")[0]));
+    const navKey = { quiz: "coach", start: "coach", wiz: "coach" }[h.split("-")[0]] || h.split("-")[0];
+    document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.getAttribute("href") === "#" + navKey));
+    if (!KNOW) know().catch(() => {});
     if (h.startsWith("deck-")) return await renderDeck(+h.slice(5));
+    if (h.startsWith("wiz-")) return await renderWizard(+h.slice(4));
+    if (h === "coach") return await renderCoachHome();
+    if (h === "quiz") return await renderQuiz();
+    if (h === "start") return await renderStart();
     if (h === "collection") return await renderCollection();
     if (h === "commanders") return await renderCommanders();
     return await renderDecks();
   } catch (e) { if (e.message !== "login") view.innerHTML = `<p class="problem">Fehler: ${esc(e.message)}</p>`; }
 }
 window.addEventListener("hashchange", () => { DECKTAB = location.hash.startsWith("#deck-") ? DECKTAB : "cards"; route(); });
-route();
+window.addEventListener("DOMContentLoaded", route);

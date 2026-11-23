@@ -141,7 +141,7 @@ async def get_cards(names, fuzzy_fallback=True) -> tuple[dict, list]:
                         if _key(n) in by_key:
                             found[n] = by_key[_key(n)]
                 not_found.extend(n for n in batch if n not in found)
-                await asyncio.sleep(0.12)
+                await asyncio.sleep(0.5)
 
             if fuzzy_fallback and not_found:
                 still = []
@@ -155,21 +155,33 @@ async def get_cards(names, fuzzy_fallback=True) -> tuple[dict, list]:
                             still.append(n)
                     except httpx.HTTPError:
                         still.append(n)
-                    await asyncio.sleep(0.12)
+                    await asyncio.sleep(0.5)
                 not_found = still + not_found[60:]
     return found, not_found
 
 
+_search_cache: dict = {}
+
+
 async def search(query: str, limit=40) -> list[dict]:
-    """Scryfall-Volltextsuche (Syntax wie auf scryfall.com)."""
-    async with httpx.AsyncClient(headers=HEADERS, timeout=30) as client:
-        r = await client.get(f"{API}/cards/search", params={"q": query, "order": "edhrec"})
-        if r.status_code == 404:
-            return []
-        r.raise_for_status()
-        cards = r.json().get("data", [])[:limit]
+    """Scryfall-Volltextsuche (Syntax wie auf scryfall.com), 6 h im Speicher gecacht."""
+    hit = _search_cache.get(query)
+    if hit and time.time() - hit[0] < 6 * 3600:
+        return hit[1][:limit]
+    try:
+        async with httpx.AsyncClient(headers=HEADERS, timeout=30) as client:
+            r = await client.get(f"{API}/cards/search", params={"q": query, "order": "edhrec"})
+            if r.status_code == 404:
+                return []
+            r.raise_for_status()
+            cards = r.json().get("data", [])[:limit]
+        await asyncio.sleep(0.5)  # Such-Endpunkt: max. 2 Anfragen/Sekunde
+    except httpx.HTTPError:
+        return []
     with db() as con:
-        return [_store(con, c) for c in cards]
+        out = [_store(con, c) for c in cards]
+    _search_cache[query] = (time.time(), out)
+    return out
 
 
 async def autocomplete(q: str) -> list[str]:
@@ -177,3 +189,24 @@ async def autocomplete(q: str) -> list[str]:
         r = await client.get(f"{API}/cards/autocomplete", params={"q": q})
         r.raise_for_status()
         return r.json().get("data", [])
+
+
+async def game_changers() -> set[str]:
+    """Aktuelle Game-Changer-Liste (Scryfall is:gamechanger), 1x täglich, sonst Fallback aus knowledge."""
+    from .db import meta_get, meta_set
+    from .knowledge import GAME_CHANGERS
+
+    names, ts = meta_get("game_changers", None)
+    if names and time.time() - ts < 24 * 3600:
+        return set(names)
+    try:
+        async with httpx.AsyncClient(headers=HEADERS, timeout=20) as client:
+            r = await client.get(f"{API}/cards/search", params={"q": "is:gamechanger", "unique": "cards"})
+            r.raise_for_status()
+            fresh = [c["name"] for c in r.json().get("data", [])]
+        if len(fresh) >= 20:
+            meta_set("game_changers", fresh)
+            return set(fresh)
+    except (httpx.HTTPError, ValueError, KeyError):
+        pass
+    return set(names) if names else set(GAME_CHANGERS)

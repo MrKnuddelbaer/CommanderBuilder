@@ -21,19 +21,28 @@ def edhrec_slug(name: str) -> str:
     return re.sub(r"[\s-]+", "-", name).strip("-")
 
 
-async def edhrec_commander(commander: str) -> dict:
-    """Liest die EDHREC-Commanderseite. Rückgabe: {Kartenname: {synergy, inclusion, header}}."""
-    url = f"https://json.edhrec.com/pages/commanders/{edhrec_slug(commander)}.json"
+async def edhrec_page(commander: str) -> dict:
+    """EDHREC-Commanderseite (inoffizielles JSON, 24 h gecacht).
+    Rückgabe: {"cards": {Name: {synergy, inclusion, header}}, "themes": [{name, count}], "num_decks": n}"""
+    from .db import meta_get, meta_set
+    import time
+
+    slug = edhrec_slug(commander)
+    cached, ts = meta_get(f"edhrec:{slug}", None)
+    if cached and time.time() - ts < 24 * 3600:
+        return cached
+    url = f"https://json.edhrec.com/pages/commanders/{slug}.json"
     try:
         async with httpx.AsyncClient(headers=UA, timeout=20, follow_redirects=True) as c:
             r = await c.get(url)
             if r.status_code != 200:
-                return {}
+                return {"cards": {}, "themes": [], "num_decks": 0}
             data = r.json()
     except (httpx.HTTPError, ValueError):
-        return {}
-    lists = (((data.get("container") or {}).get("json_dict") or {}).get("cardlists")) or []
-    out = {}
+        return cached or {"cards": {}, "themes": [], "num_decks": 0}
+    container = (data.get("container") or {}).get("json_dict") or {}
+    lists = container.get("cardlists") or []
+    cards = {}
     for lst in lists:
         header = lst.get("header", "")
         for cv in lst.get("cardviews", []):
@@ -42,15 +51,23 @@ async def edhrec_commander(commander: str) -> dict:
                 continue
             inc = cv.get("inclusion") or cv.get("num_decks") or 0
             pot = cv.get("potential_decks") or 0
-            out.setdefault(
-                name,
-                {
-                    "synergy": round(cv.get("synergy", 0) or 0, 2),
-                    "inclusion": round(100 * inc / pot) if pot else None,
-                    "header": header,
-                },
-            )
+            cards.setdefault(name, {
+                "synergy": round(cv.get("synergy", 0) or 0, 2),
+                "inclusion": round(100 * inc / pot) if pot else None,
+                "header": header,
+            })
+    themes = []
+    for t in ((data.get("panels") or {}).get("taglinks") or []):
+        if t.get("value"):
+            themes.append({"name": t.get("value"), "count": t.get("count"), "slug": t.get("slug")})
+    out = {"cards": cards, "themes": themes[:15], "num_decks": data.get("num_decks_avg") or (container.get("card") or {}).get("num_decks") or 0}
+    if cards:
+        meta_set(f"edhrec:{slug}", out)
     return out
+
+
+async def edhrec_commander(commander: str) -> dict:
+    return (await edhrec_page(commander))["cards"]
 
 
 async def find_combos(commander: str, names: list[str]) -> dict:
@@ -59,28 +76,49 @@ async def find_combos(commander: str, names: list[str]) -> dict:
         "commanders": [{"card": commander}] if commander else [],
         "main": [{"card": n} for n in names if n != commander],
     }
+    url = "https://backend.commanderspellbook.com/find-my-combos"
     try:
-        async with httpx.AsyncClient(headers=UA, timeout=30) as c:
-            r = await c.post("https://backend.commanderspellbook.com/find-my-combos", json=body)
+        async with httpx.AsyncClient(headers=UA, timeout=40) as c:
+            r = await c.post(url, json=body)
+            if r.status_code >= 400:
+                # Fallback: Textformat, wie es die Spellbook-Website selbst schickt
+                text = (f"// Commander\n1 {commander}\n// Main\n" if commander else "") + "\n".join(f"1 {n}" for n in names if n != commander)
+                r = await c.post(url, content=text.encode(), headers={"Content-Type": "text/plain"})
             if r.status_code != 200:
                 return {"included": [], "almost": [], "error": f"HTTP {r.status_code}"}
-            res = r.json().get("results", r.json())
+            payload = r.json()
+            res = payload.get("results", payload)
     except (httpx.HTTPError, ValueError) as e:
         return {"included": [], "almost": [], "error": str(e)}
 
+    deck_set = {n.lower() for n in names} | ({commander.lower()} if commander else set())
+    tag_names = {"R": "Ruthless (→ Bracket 4)", "S": "Spicy (→ Bracket 3)", "P": "Powerful (→ Bracket 3)",
+                 "O": "Oddball (→ Bracket 2)", "C": "Core (→ Bracket 2)", "E": "Exhibition (→ Bracket 1)", "B": "Banned"}
+
     def conv(combo):
         uses = [u.get("card", {}).get("name") for u in combo.get("uses", [])]
+        uses = [u for u in uses if u]
         produces = [p.get("feature", {}).get("name") for p in combo.get("produces", [])]
+        tag = combo.get("bracketTag")
         return {
-            "cards": [u for u in uses if u],
-            "result": [p for p in produces if p][:3],
-            "bracket": combo.get("bracketTag"),
+            "cards": uses,
+            "missing": [u for u in uses if u.lower() not in deck_set and u.split(" // ")[0].lower() not in deck_set],
+            "result": [p for p in produces if p][:4],
+            "steps": (combo.get("description") or "").strip(),
+            "prerequisites": (combo.get("notablePrerequisites") or combo.get("easyPrerequisites") or "").strip(),
+            "mana_needed": combo.get("manaNeeded") or "",
+            "bracket_tag": tag,
+            "bracket_label": tag_names.get(tag, tag),
+            "popularity": combo.get("popularity"),
             "url": f"https://commanderspellbook.com/combo/{combo.get('id')}/" if combo.get("id") else None,
         }
 
+    almost = [conv(x) for x in (res.get("almostIncluded") or [])]
+    almost = [a for a in almost if len(a["missing"]) == 1]
+    almost.sort(key=lambda a: -(a.get("popularity") or 0))
     return {
         "included": [conv(x) for x in (res.get("included") or [])][:20],
-        "almost": [conv(x) for x in (res.get("almostIncluded") or [])][:15],
+        "almost": almost[:20],
     }
 
 

@@ -7,3 +7,7 @@
 - Brackets: 2 = Precon-Niveau (keine Game Changer), 3 = bis 3 Game Changer, 4+ = frei. Combos werden nur markiert, nie automatisch eingebaut.
 - Arbeitsweise: Änderungen erst im Test-Dienst (Branch `test`), nach OK nach `main` (Live).
 - Tests: `python -m pytest tests/`; Scryfall ist aus Claude-Sandboxen oft nicht erreichbar → `tests/fake_scryfall.py` nutzen.
+- Coach (v0.2, `app/coach.py`, `app/knowledge.py`, `static/coach.js`): Lehrer-Modus – erklärt, zeigt Optionen, Fabian entscheidet. Profil in `meta.profile` (No-Gos: lange Züge, Stax, MLD; Combos aktiv vorschlagen; Einsteiger-Erklärungen).
+- Wissensbasis/Quellen: `docs/commander-wissen.md` (Recherche Nov. 2026). Zahlen in `knowledge.py` stammen daraus.
+- Game Changer: live per Scryfall `is:gamechanger` (1x täglich in `meta`), Fallback-Liste in `knowledge.py`.
+- Commander-Spellbook-Request-Format nicht verifiziert: JSON `{commanders, main}` mit Text-Fallback (`advisor.find_combos`). Bei echten Fehlern zuerst dort schauen.

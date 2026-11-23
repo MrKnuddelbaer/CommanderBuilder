@@ -51,3 +51,11 @@ def named(fuzzy: str):
 @app.get("/cards/autocomplete")
 def ac(q: str):
     return {"data": [n for n in KNOWN if q.lower() in n][:10]}
+
+
+@app.get("/cards/search")
+def search(q: str, order: str = "", unique: str = ""):
+    if "gamechanger" in q:
+        return {"data": [card("Rhystic Study")] + [card(f"Gc Card {i}") for i in range(25)]}
+    names = ["Sol Ring", "Cultivate", "Path to Exile", "Selfless Spirit", "Polyraptor", "Heroic Intervention", "Kodama's Reach"]
+    return {"data": [card(n) for n in names]}
