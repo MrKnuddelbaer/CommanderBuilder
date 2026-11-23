@@ -60,7 +60,7 @@ def status(request: Request):
     }
 
 
-from .core import _deck_row, _full_deck, _resolve_list, _save_cards, ownership  # noqa: E402
+from .core import _deck_row, _full_deck, _resolve_list, _save_cards, commander_names, ownership  # noqa: E402
 
 
 # ---------- Sammlung ----------
@@ -136,7 +136,7 @@ async def create_deck(body: NewDeck):
     if body.commander and not any(e["section"] == "commander" for e in entries):
         entries.insert(0, {"name": body.commander, "qty": 1, "section": "commander"})
     resolved, nf = await _resolve_list(entries)
-    cmd = next((e["name"] for e in resolved if e["section"] == "commander"), body.commander)
+    cmd = " + ".join(e["name"] for e in resolved if e["section"] == "commander") or body.commander
     with db() as con:
         cur = con.execute("INSERT INTO decks(name, commander, bracket, budget_eur, created_at) VALUES (?,?,?,?,?)",
                           (body.name, cmd, body.bracket, body.budget_eur, now()))
@@ -243,7 +243,7 @@ async def swap(deck_id: int, body: Swap):
 @app.get("/api/decks/{deck_id}/combos")
 async def combos(deck_id: int):
     deck, rows = _deck_row(deck_id)
-    return await advisor.find_combos(deck.get("commander") or "", [r["name"] for r in rows if r["section"] != "maybe"])
+    return await advisor.find_combos(commander_names(rows), [r["name"] for r in rows if r["section"] != "maybe"])
 
 
 @app.get("/api/decks/{deck_id}/shopping")
@@ -281,12 +281,13 @@ class SuggestReq(BaseModel):
 async def suggest(deck_id: int, body: SuggestReq):
     deck, cards = await _full_deck(deck_id)
     ana = analysis.analyse(deck, cards)
-    commander = deck.get("commander") or ""
+    cmds = commander_names(cards)
+    commander = " + ".join(cmds)
     ci = set(ana["color_identity"])
     in_deck = {c["name"].lower() for c in cards}
     owned, used = ownership(exclude_deck=deck_id)
 
-    ed = await advisor.edhrec_commander(commander) if commander else {}
+    ed = await advisor.edhrec_commander(cmds) if cmds else {}
     for c in cards:
         c["edhrec_inclusion"] = (ed.get(c["name"]) or {}).get("inclusion")
 

@@ -21,13 +21,30 @@ def edhrec_slug(name: str) -> str:
     return re.sub(r"[\s-]+", "-", name).strip("-")
 
 
-async def edhrec_page(commander: str) -> dict:
-    """EDHREC-Commanderseite (inoffizielles JSON, 24 h gecacht).
+async def edhrec_page(commander) -> dict:
+    """EDHREC-Commanderseite (inoffizielles JSON, 24 h gecacht). commander: Name oder Liste (Partner-Paar).
     Rückgabe: {"cards": {Name: {synergy, inclusion, header}}, "themes": [{name, count}], "num_decks": n}"""
+    names = [commander] if isinstance(commander, str) else [n for n in commander if n]
+    if not names:
+        return {"cards": {}, "themes": [], "num_decks": 0}
+    if len(names) > 1:
+        # EDHREC führt Paare alphabetisch: /commanders/thrasios-triton-hero-tymna-the-weaver
+        slugs = sorted(edhrec_slug(n) for n in names)
+        for pair in ("-".join(slugs), "-".join(reversed(slugs))):
+            page = await _edhrec_slug_page(pair)
+            if page["cards"]:
+                page["pair"] = True
+                return page
+        page = await _edhrec_slug_page(edhrec_slug(names[0]))
+        page["pair"] = False
+        return page
+    return await _edhrec_slug_page(edhrec_slug(names[0]))
+
+
+async def _edhrec_slug_page(slug: str) -> dict:
     from .db import meta_get, meta_set
     import time
 
-    slug = edhrec_slug(commander)
     cached, ts = meta_get(f"edhrec:{slug}", None)
     if cached and time.time() - ts < 24 * 3600:
         return cached
@@ -66,15 +83,17 @@ async def edhrec_page(commander: str) -> dict:
     return out
 
 
-async def edhrec_commander(commander: str) -> dict:
+async def edhrec_commander(commander) -> dict:
     return (await edhrec_page(commander))["cards"]
 
 
-async def find_combos(commander: str, names: list[str]) -> dict:
+async def find_combos(commander, names: list[str]) -> dict:
     """Commander Spellbook: welche Combos sind komplett im Deck, welche fehlen nur 1 Karte."""
+    cmds = [commander] if isinstance(commander, str) else list(commander or [])
+    cmds = [c for c in cmds if c]
     body = {
-        "commanders": [{"card": commander}] if commander else [],
-        "main": [{"card": n} for n in names if n != commander],
+        "commanders": [{"card": c} for c in cmds],
+        "main": [{"card": n} for n in names if n not in cmds],
     }
     url = "https://backend.commanderspellbook.com/find-my-combos"
     try:
@@ -82,7 +101,7 @@ async def find_combos(commander: str, names: list[str]) -> dict:
             r = await c.post(url, json=body)
             if r.status_code >= 400:
                 # Fallback: Textformat, wie es die Spellbook-Website selbst schickt
-                text = (f"// Commander\n1 {commander}\n// Main\n" if commander else "") + "\n".join(f"1 {n}" for n in names if n != commander)
+                text = ("// Commander\n" + "\n".join(f"1 {c}" for c in cmds) + "\n// Main\n" if cmds else "") + "\n".join(f"1 {n}" for n in names if n not in cmds)
                 r = await c.post(url, content=text.encode(), headers={"Content-Type": "text/plain"})
             if r.status_code != 200:
                 return {"included": [], "almost": [], "error": f"HTTP {r.status_code}"}
@@ -91,7 +110,7 @@ async def find_combos(commander: str, names: list[str]) -> dict:
     except (httpx.HTTPError, ValueError) as e:
         return {"included": [], "almost": [], "error": str(e)}
 
-    deck_set = {n.lower() for n in names} | ({commander.lower()} if commander else set())
+    deck_set = {n.lower() for n in names} | {c.lower() for c in cmds}
     tag_names = {"R": "Ruthless (→ Bracket 4)", "S": "Spicy (→ Bracket 3)", "P": "Powerful (→ Bracket 3)",
                  "O": "Oddball (→ Bracket 2)", "C": "Core (→ Bracket 2)", "E": "Exhibition (→ Bracket 1)", "B": "Banned"}
 

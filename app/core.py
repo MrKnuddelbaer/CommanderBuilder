@@ -69,3 +69,7 @@ async def _full_deck(deck_id):
     return deck, cards
 
 
+
+
+def commander_names(cards: list[dict]) -> list[str]:
+    return [c["name"] for c in cards if c.get("section") == "commander"]

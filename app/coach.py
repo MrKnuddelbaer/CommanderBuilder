@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from . import advisor, analysis, knowledge as K, scryfall
-from .core import _deck_row, _full_deck, _resolve_list, _save_cards, ownership
+from .core import _deck_row, _full_deck, _resolve_list, _save_cards, commander_names, ownership
 from .db import db, meta_get, meta_set, now
 
 router = APIRouter(prefix="/api")
@@ -70,25 +70,36 @@ async def finder_questionnaire(body: Answers):
 
 
 @router.get("/finder/commander")
-async def finder_commander(name: str):
-    """Einstieg über einen Commander: was kann er, welche Themen, wie viel besitze ich schon?"""
-    found, nf = await scryfall.get_cards([name])
-    if not found:
+async def finder_commander(name: str, partner: str = ""):
+    """Einstieg über einen Commander (optional mit Partner): was kann er, welche Themen, wie viel besitze ich schon?"""
+    found, nf = await scryfall.get_cards([n for n in (name, partner) if n])
+    if name not in found:
         raise HTTPException(404, f"Commander nicht gefunden: {name}")
-    c = list(found.values())[0]
-    page = await advisor.edhrec_page(c["name"])
+    c = found[name]
+    p = found.get(partner) if partner else None
+    pair = None
+    if partner:
+        if not p:
+            raise HTTPException(404, f"Zweiter Commander nicht gefunden: {partner}")
+        ok, why = K.pair_check(c, p)
+        pair = {"ok": ok, "why": why, "color_identity": sorted(set(c["color_identity"]) | set(p["color_identity"]), key="WUBRG".index)}
+    page = await advisor.edhrec_page([c["name"]] + ([p["name"]] if p else []))
     owned, used = ownership()
     have = [n for n in page["cards"] if n.lower() in owned]
     gcs = await scryfall.game_changers()
     return {
         "card": c,
-        "is_game_changer": c["name"] in gcs,
+        "partner_card": p,
+        "pair": pair,
+        "pair_info": K.pair_info(c),
+        "edhrec_pair_page": page.get("pair"),
+        "is_game_changer": c["name"] in gcs or bool(p and p["name"] in gcs),
         "themes": page["themes"],
         "edhrec_cards": len(page["cards"]),
         "owned_from_edhrec": len(have),
         "owned_examples": have[:15],
         "percent": round(100 * len(have) / len(page["cards"])) if page["cards"] else 0,
-        "edhrec_url": f"https://edhrec.com/commanders/{advisor.edhrec_slug(c['name'])}",
+        "edhrec_url": "https://edhrec.com/commanders/" + ("-".join(sorted(advisor.edhrec_slug(x["name"]) for x in (c, p))) if p and page.get("pair") else advisor.edhrec_slug(c["name"])),
     }
 
 
@@ -96,6 +107,7 @@ async def finder_commander(name: str):
 class WizardStart(BaseModel):
     name: str
     commander: str
+    partner: str | None = None
     bracket: int = 2
     budget_eur: float = 25
     archetype: str | None = None
@@ -105,14 +117,23 @@ class WizardStart(BaseModel):
 
 @router.post("/wizard/start")
 async def wizard_start(body: WizardStart):
-    resolved, nf = await _resolve_list([{"name": body.commander, "qty": 1, "section": "commander", "role": None}])
-    if not resolved:
-        raise HTTPException(404, f"Commander nicht gefunden: {body.commander}")
+    entries = [{"name": body.commander, "qty": 1, "section": "commander", "role": None}]
+    if body.partner:
+        entries.append({"name": body.partner, "qty": 1, "section": "commander", "role": None})
+    resolved, nf = await _resolve_list(entries)
+    if not resolved or (body.partner and len(resolved) < 2):
+        raise HTTPException(404, f"Commander nicht gefunden: {', '.join(nf) or body.commander}")
+    if len(resolved) == 2:
+        found, _ = await scryfall.get_cards([r["name"] for r in resolved])
+        ok, why = K.pair_check(found[resolved[0]["name"]], found[resolved[1]["name"]])
+        if not ok:
+            raise HTTPException(400, why)
+    display = " + ".join(r["name"] for r in resolved)
     with db() as con:
         cur = con.execute(
             "INSERT INTO decks(name, commander, bracket, budget_eur, created_at, plan, archetype, wizard_step, mode, table_notes) "
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (body.name, resolved[0]["name"], body.bracket, body.budget_eur, now(), body.plan, body.archetype, "plan", "wizard", body.table_notes),
+            (body.name, display, body.bracket, body.budget_eur, now(), body.plan, body.archetype, "table", "wizard", body.table_notes),
         )
         _save_cards(con, cur.lastrowid, resolved)
     return {"id": cur.lastrowid}
@@ -162,7 +183,8 @@ async def _candidates(deck, cards, ana, role, gcs, limit=40):
     ci = "".join(ana["color_identity"]) or "C"
     in_deck = {c["name"].lower() for c in cards}
     owned, used = ownership(exclude_deck=deck["id"])
-    page = await advisor.edhrec_page(deck.get("commander") or "") if deck.get("commander") else {"cards": {}}
+    cmds = commander_names(cards)
+    page = await advisor.edhrec_page(cmds) if cmds else {"cards": {}}
     ed = page["cards"]
 
     names = []
@@ -224,10 +246,13 @@ async def wizard_step(deck_id: int, step_id: str):
         "candidates": cands,
     }
     if step_id == "commander":
-        cmd = next((c for c in cards if c["section"] == "commander"), None)
-        if cmd:
-            page = await advisor.edhrec_page(cmd["name"])
-            result["commander"] = {"card": cmd, "themes": page["themes"], "is_game_changer": cmd["name"] in gcs}
+        cmds = sorted([c for c in cards if c["section"] == "commander"], key=lambda c: "Background" in (c.get("type_line") or ""))
+        if cmds:
+            page = await advisor.edhrec_page([c["name"] for c in cmds])
+            pair = K.pair_check(cmds[0], cmds[1]) if len(cmds) == 2 else None
+            result["commander"] = {"card": cmds[0], "cards": cmds, "themes": page["themes"],
+                                   "is_game_changer": any(c["name"] in gcs for c in cmds),
+                                   "pair_info": K.pair_info(cmds[0]), "pair": pair and {"ok": pair[0], "why": pair[1]}}
     if step_id == "lands":
         colors = len(ana["color_identity"])
         result["formula"] = {
@@ -235,7 +260,7 @@ async def wizard_step(deck_id: int, step_id: str):
             "text": f"31 + {colors} Farben + Commander-MV {ana['commander_mv']:g} = {round(31 + colors + (ana['commander_mv'] or 0))} Länder (Rocks zählen teilweise mit: 2–3 Rocks ≈ 1 Land).",
         }
     if step_id in ("wincon", "check"):
-        result["combos"] = await advisor.find_combos(deck.get("commander") or "", [c["name"] for c in cards if c["section"] != "maybe"])
+        result["combos"] = await advisor.find_combos(commander_names(cards), [c["name"] for c in cards if c["section"] != "maybe"])
     if step_id == "rule0":
         result["rule0"] = await rule0(deck_id)
     return result
@@ -287,7 +312,7 @@ def card_feedback(card, role, deck, cards, ana, gcs) -> list[dict]:
         fb.append({"level": "info", "text": f"Manawert {card.get('cmc'):g}: Pro Spiel wirkst du im Schnitt nur 1–2 Karten mit 7+. Lohnt sich die hier besonders?"})
     if card["name"] in K.SALT_TOP:
         fb.append({"level": "warn", "text": f"Salt {K.SALT_TOP[card['name']]}: eine der unbeliebtesten Karten – vorher am Tisch ansagen."})
-    if "power" in card and card.get("toughness") and (deck.get("commander") or "").startswith("Pantlaza") and "Dinosaur" in (card.get("type_line") or ""):
+    if "power" in card and card.get("toughness") and any(n.startswith("Pantlaza") for n in commander_names(cards)) and "Dinosaur" in (card.get("type_line") or ""):
         try:
             fb.append({"level": "good", "text": f"Dino mit Widerstandskraft {card['toughness']} → Pantlaza löst Discover {int(card['toughness'])} aus."})
         except ValueError:
@@ -308,20 +333,87 @@ def set_role(deck_id: int, body: RoleSet):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- Zweiter Commander
+@router.get("/partners")
+async def partners(name: str, limit: int = 40):
+    """Passende Zweit-Commander für eine Karte – eigene zuerst."""
+    found, _ = await scryfall.get_cards([name])
+    if name not in found:
+        raise HTTPException(404, f"Karte nicht gefunden: {name}")
+    card = found[name]
+    info = K.pair_info(card)
+    q = K.partner_query(card)
+    if not q:
+        return {"info": info, "candidates": []}
+    results = await scryfall.search(f"{q} f:commander", limit=120)
+    owned, used = ownership()
+    out = []
+    for c in results:
+        if c["name"] == card["name"]:
+            continue
+        ok, why = K.pair_check(card, c)
+        if not ok:
+            continue
+        out.append({"name": c["name"], "type_line": c.get("type_line"), "mana_cost": c.get("mana_cost"), "text": c.get("oracle_text"),
+                    "image": c.get("image"), "image_small": c.get("image_small"), "eur": c.get("eur"),
+                    "color_identity": c.get("color_identity"),
+                    "combined_identity": sorted(set(card["color_identity"]) | set(c.get("color_identity", [])), key="WUBRG".index),
+                    "owned": owned.get(c["name"].lower(), 0) >= 1, "in_decks": used.get(c["name"].lower(), []), "edhrec_rank": c.get("edhrec_rank")})
+    out.sort(key=lambda x: (not x["owned"], x["edhrec_rank"] or 99999))
+    return {"info": info, "candidates": out[:limit]}
+
+
+class CmdOp(BaseModel):
+    name: str
+
+
+@router.post("/decks/{deck_id}/commander")
+async def add_commander(deck_id: int, body: CmdOp):
+    deck, cards = await _full_deck(deck_id)
+    cmds = [c for c in cards if c["section"] == "commander"]
+    if len(cmds) >= 2:
+        raise HTTPException(400, "Es gibt schon zwei Commander. Entferne zuerst einen.")
+    resolved, _ = await _resolve_list([{"name": body.name, "qty": 1, "section": "commander"}])
+    if not resolved:
+        raise HTTPException(404, f"Karte nicht gefunden: {body.name}")
+    new = (await scryfall.get_cards([resolved[0]["name"]]))[0][resolved[0]["name"]]
+    if cmds:
+        ok, why = K.pair_check(cmds[0], new)
+        if not ok:
+            raise HTTPException(400, why)
+    with db() as con:
+        con.execute("DELETE FROM deck_cards WHERE deck_id=? AND name=? AND section!='commander'", (deck_id, new["name"]))
+        _save_cards(con, deck_id, resolved)
+        names = [c["name"] for c in cmds] + [new["name"]]
+        con.execute("UPDATE decks SET commander=? WHERE id=?", (" + ".join(names), deck_id))
+        con.execute("INSERT INTO history(deck_id, action, created_at) VALUES (?,?,?)", (deck_id, f"Commander + {new['name']}", now()))
+    return {"ok": True, "name": new["name"], "color_identity": sorted(set().union(*[set(c.get("color_identity", [])) for c in cmds + [new]]), key="WUBRG".index)}
+
+
+@router.delete("/decks/{deck_id}/commander")
+def remove_commander(deck_id: int, name: str):
+    with db() as con:
+        con.execute("DELETE FROM deck_cards WHERE deck_id=? AND name=? AND section='commander'", (deck_id, name))
+        rest = [r["name"] for r in con.execute("SELECT name FROM deck_cards WHERE deck_id=? AND section='commander'", (deck_id,))]
+        con.execute("UPDATE decks SET commander=? WHERE id=?", (" + ".join(rest), deck_id))
+        con.execute("INSERT INTO history(deck_id, action, created_at) VALUES (?,?,?)", (deck_id, f"Commander − {name}", now()))
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- Check & Rule 0
 @router.get("/decks/{deck_id}/check")
 async def full_check(deck_id: int):
     deck, cards, ana, gcs = await _context(deck_id)
-    combos = await advisor.find_combos(deck.get("commander") or "", [c["name"] for c in cards if c["section"] != "maybe"])
+    combos = await advisor.find_combos(commander_names(cards), [c["name"] for c in cards if c["section"] != "maybe"])
     b = deck.get("bracket") or 2
     rules = K.BRACKETS[b]
     findings = []
     gc = ana["game_changers"]
     if len(gc) > rules["gc"]:
         findings.append({"level": "critical", "text": f"{len(gc)} Game Changer, Bracket {b} erlaubt {rules['gc'] if rules['gc'] < 99 else 'beliebig viele'}: {', '.join(gc)}"})
-    cmd = next((c for c in cards if c["section"] == "commander"), None)
-    if cmd and cmd["name"] in gcs and b <= 2:
-        findings.append({"level": "critical", "text": f"Dein Commander {cmd['name']} ist ein Game Changer – erst ab Bracket 3."})
+    for cmd in [c for c in cards if c["section"] == "commander"]:
+        if cmd["name"] in gcs and b <= 2:
+            findings.append({"level": "critical", "text": f"Dein Commander {cmd['name']} ist ein Game Changer – erst ab Bracket 3."})
     two_card = [x for x in combos.get("included", []) if len(x["cards"]) <= 2]
     if combos.get("included"):
         if b <= 2:

@@ -346,3 +346,83 @@ DEFAULT_PROFILE = {
     "nogos": ["long_turns", "stax", "mld"],
     "questionnaire": {},
 }
+
+
+# ---------------------------------------------------------------- Zwei Commander (Partner & Co.)
+PAIR_MECHANICS = {
+    "partner": "Partner: Zwei Commander mit „Partner“ dürfen zusammen spielen. Ihre Farbidentitäten werden addiert – so baust du z. B. ein Vierfarben-Deck aus zwei Zweifarb-Commandern.",
+    "partner_with": "Partner with: Diese Karte hat genau einen festen Partner. Bonus: Kommt einer ins Spiel, darfst du den anderen aus der Bibliothek suchen (in Commander liegt er aber ohnehin in der Kommandozone).",
+    "friends_forever": "Friends forever: Wie Partner, aber nur mit anderen „Friends forever“-Karten kombinierbar.",
+    "partner_variant": "Partner-Variante: Nur Karten mit genau derselben Partner-Variante dürfen zusammen Commander sein.",
+    "background": "Choose a Background: Dein zweiter „Commander“ ist eine Background-Verzauberung. Sie liegt mit in der Kommandozone und verstärkt deinen Commander dauerhaft.",
+    "is_background": "Background: Diese Verzauberung braucht einen Commander mit „Choose a Background“.",
+    "doctors_companion": "Doctor's companion: Diese Kreatur darf zusammen mit einem „Time Lord Doctor“ Commander sein.",
+    "is_doctor": "Time Lord Doctor: Kann mit einer Kreatur mit „Doctor's companion“ zusammen Commander sein.",
+}
+
+
+def pair_info(card: dict) -> dict:
+    """Welche Zwei-Commander-Mechanik hat die Karte? (Oracle-Text + Typzeile)"""
+    t = card.get("oracle_text") or ""
+    tl = card.get("type_line") or ""
+    m = _re.search(r"Partner with ([^\n(]+?)(?:\s*\(|\n|$)", t)
+    if m:
+        return {"type": "partner_with", "partner": m.group(1).strip(), "text": PAIR_MECHANICS["partner_with"]}
+    m = _re.search(r"Partner\s*[—–-]\s*([^\n(]+?)(?:\s*\(|\n|$)", t)
+    if m:
+        return {"type": "partner_variant", "variant": m.group(1).strip(), "text": PAIR_MECHANICS["partner_variant"] + f" (hier: „{m.group(1).strip()}“)"}
+    if _re.search(r"(^|\n)Partner(\s*\(|\s*$|\n)", t):
+        return {"type": "partner", "text": PAIR_MECHANICS["partner"]}
+    if "Friends forever" in t:
+        return {"type": "friends_forever", "text": PAIR_MECHANICS["friends_forever"]}
+    if "Choose a Background" in t:
+        return {"type": "background", "text": PAIR_MECHANICS["background"]}
+    if "Background" in tl and "Enchantment" in tl:
+        return {"type": "is_background", "text": PAIR_MECHANICS["is_background"]}
+    if "Doctor's companion" in t:
+        return {"type": "doctors_companion", "text": PAIR_MECHANICS["doctors_companion"]}
+    if "Time Lord" in tl and "Doctor" in tl:
+        return {"type": "is_doctor", "text": PAIR_MECHANICS["is_doctor"]}
+    return {"type": None, "text": "Dieser Commander hat keine Partner-Mechanik – er spielt allein."}
+
+
+def pair_check(a: dict, b: dict) -> tuple[bool, str]:
+    pa, pb = pair_info(a), pair_info(b)
+    ta, tb = pa["type"], pb["type"]
+    if ta == tb == "partner":
+        return True, "Beide haben Partner ✓"
+    if ta == "partner_with" or tb == "partner_with":
+        ok = (ta == "partner_with" and pa["partner"].lower() == b["name"].lower()) or (tb == "partner_with" and pb["partner"].lower() == a["name"].lower())
+        return (True, "Feste Partner ✓") if ok else (False, f"{a['name'] if ta == 'partner_with' else b['name']} darf nur mit {pa.get('partner') or pb.get('partner')} zusammen spielen.")
+    if ta == tb == "friends_forever":
+        return True, "Beide haben Friends forever ✓"
+    if ta == tb == "partner_variant":
+        return (True, "Gleiche Partner-Variante ✓") if pa["variant"].lower() == pb["variant"].lower() else (False, "Unterschiedliche Partner-Varianten passen nicht zusammen.")
+    if {ta, tb} == {"background", "is_background"}:
+        return True, "Commander + Background ✓"
+    if {ta, tb} == {"doctors_companion", "is_doctor"}:
+        return True, "Doctor + Companion ✓"
+    return False, f"Diese beiden dürfen nicht zusammen Commander sein ({a['name']}: {pa['text'].split(':')[0]}; {b['name']}: {pb['text'].split(':')[0]})."
+
+
+def partner_query(card: dict) -> str | None:
+    """Scryfall-Suche nach passenden Zweit-Commandern."""
+    p = pair_info(card)
+    t = p["type"]
+    if t == "partner":
+        return 'is:commander o:"if both have partner"'
+    if t == "partner_with":
+        return f'!"{p["partner"]}"'
+    if t == "friends_forever":
+        return 'o:"Friends forever"'
+    if t == "partner_variant":
+        return f'o:"Partner—{p["variant"]}"'
+    if t == "background":
+        return "t:background"
+    if t == "is_background":
+        return 'o:"Choose a Background"'
+    if t == "doctors_companion":
+        return 't:"time lord" t:doctor'
+    if t == "is_doctor":
+        return 'o:"Doctor\'s companion"'
+    return None

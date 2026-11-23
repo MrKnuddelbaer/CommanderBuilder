@@ -16,6 +16,14 @@ KNOWN = {
     "polyraptor": dict(type_line="Creature — Dinosaur", mana_cost="{6}{G}{G}", cmc=8, color_identity=["G"], toughness="5", oracle_text="Enrage — Whenever Polyraptor is dealt damage, create a token that's a copy of Polyraptor."),
     "selfless spirit": dict(type_line="Creature — Spirit", mana_cost="{1}{W}", cmc=2, color_identity=["W"], oracle_text="Flying. Sacrifice Selfless Spirit: Creatures you control gain indestructible until end of turn."),
 }
+P = "Partner (You can have two commanders if both have partner.)"
+KNOWN.update({
+    "thrasios, triton hero": dict(type_line="Legendary Creature — Merfolk Wizard", mana_cost="{G}{U}", cmc=2, color_identity=["G", "U"], oracle_text="{4}: Scry 1, then reveal the top card of your library.\n" + P),
+    "tymna the weaver": dict(type_line="Legendary Creature — Human Cleric", mana_cost="{1}{W}{B}", cmc=3, color_identity=["W", "B"], oracle_text="Lifelink\n" + P),
+    "kraum, ludevic's opus": dict(type_line="Legendary Creature — Zombie Horror", mana_cost="{3}{U}{R}", cmc=5, color_identity=["U", "R"], oracle_text="Flying, haste\n" + P),
+    "wilson, refined grizzly": dict(type_line="Legendary Creature — Bear Warrior", mana_cost="{1}{G}", cmc=2, color_identity=["G"], oracle_text="Reach, trample, ward {2}\nChoose a Background (You can have a Background as a second commander.)"),
+    "raised by giants": dict(type_line="Legendary Enchantment — Background", mana_cost="{5}{G}", cmc=6, color_identity=["G"], oracle_text="Commander creatures you own have base power and toughness 10/10 and are Giants in addition to their other types."),
+})
 BAD = {"paradise chocobo", "castle dracula"}
 
 
@@ -57,5 +65,9 @@ def ac(q: str):
 def search(q: str, order: str = "", unique: str = ""):
     if "gamechanger" in q:
         return {"data": [card("Rhystic Study")] + [card(f"Gc Card {i}") for i in range(25)]}
+    if "if both have partner" in q:
+        return {"data": [card(n) for n in ["Thrasios, Triton Hero", "Tymna the Weaver", "Kraum, Ludevic's Opus"]]}
+    if "t:background" in q:
+        return {"data": [card("Raised by Giants")]}
     names = ["Sol Ring", "Cultivate", "Path to Exile", "Selfless Spirit", "Polyraptor", "Heroic Intervention", "Kodama's Reach"]
     return {"data": [card(n) for n in names]}

@@ -71,9 +71,9 @@ let DECK = null, DECKTAB = "cards";
 async function renderDeck(id) {
   DECK = await api("/api/decks/" + id);
   const d = DECK.deck, a = DECK.analysis;
-  const cmd = DECK.cards.find((c) => c.section === "commander");
+  const cmdsAll = DECK.cards.filter((c) => c.section === "commander");
   view.innerHTML = `<div class="row" style="align-items:flex-start">
-      ${cmd?.image_small ? `<img src="${esc(cmd.image_small)}" style="width:110px;border-radius:8px;cursor:pointer" onclick="preview('${esc(cmd.image)}')">` : ""}
+      ${cmdsAll.filter((c) => c.image_small).map((c) => `<img src="${esc(c.image_small)}" style="width:${cmdsAll.length > 1 ? 80 : 110}px;border-radius:8px;cursor:pointer" onclick="preview('${esc(c.image)}')">`).join("")}
       <div style="flex:1;min-width:200px"><h1 style="margin-bottom:.2rem">${esc(d.name)}</h1>
         <div class="muted">${pips(a.color_identity)} ${esc(d.commander || "")}</div>
         <div class="row small" style="margin-top:.5rem">

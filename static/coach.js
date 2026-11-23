@@ -107,6 +107,9 @@ async function renderStart() {
   view.innerHTML = `<h1>👑 Neues Deck mit dem Coach</h1>
     <div class="panel"><label>Commander</label><div class="row"><input id="sc" list="sac" value="${esc(p.commander || "")}" placeholder="z. B. Pantlaza, Sun-Favored" style="flex:1"><datalist id="sac"></datalist><button id="slook">Ansehen</button></div>
       <div id="sinfo"></div>
+      <label>Zweiter Commander (optional – Partner, Background, Doctor's Companion …)</label>
+      <div class="row"><input id="sp" list="spac" value="${esc(p.partner || "")}" placeholder="z. B. Tymna the Weaver oder Raised by Giants" style="flex:1"><datalist id="spac"></datalist><button id="splook">Prüfen</button></div>
+      <div id="pinfo"></div>
       <label>Archetyp (optional)</label><select id="sa"><option value="">– noch offen –</option>${Object.entries(KNOW.archetypes).map(([k, a]) => `<option value="${k}" ${p.archetype === k ? "selected" : ""}>${esc(a.name)}</option>`).join("")}</select>
       <div class="row"><div><label>Ziel-Bracket</label><select id="sb">${[1, 2, 3, 4].map((b) => `<option value="${b}" ${b === 2 ? "selected" : ""}>${b} – ${esc(KNOW.brackets[b].name)}</option>`).join("")}</select></div>
         <div><label>Budget (€)</label><input id="sbu" type="number" value="25" style="width:6rem"></div></div>
@@ -114,13 +117,14 @@ async function renderStart() {
       <label>Deckname</label><input id="sn" style="width:100%" placeholder="z. B. Dino-Chaos">
       <p><button class="primary" id="sgo">Assistent starten</button></p></div>`;
   autocomplete($("#sc"), $("#sac"));
+  autocomplete($("#sp"), $("#spac"));
   const bd = () => ($("#bdesc").textContent = KNOW.brackets[$("#sb").value].desc);
   $("#sb").onchange = bd; bd();
   const look = async () => {
     if (!$("#sc").value) return;
     $("#sinfo").innerHTML = '<p class="muted small">Schaue nach …</p>';
     try {
-      const r = await api("/api/finder/commander?name=" + encodeURIComponent($("#sc").value));
+      const r = await api("/api/finder/commander?name=" + encodeURIComponent($("#sc").value) + "&partner=" + encodeURIComponent($("#sp").value || ""));
       $("#sc").value = r.card.name;
       $("#sinfo").innerHTML = `<div class="row" style="align-items:flex-start;margin:.6rem 0">${r.card.image_small ? `<img src="${esc(r.card.image_small)}" style="width:110px;border-radius:8px" onclick="preview('${esc(r.card.image)}')">` : ""}
         <div style="flex:1;min-width:180px"><div>${pips(r.card.color_identity)} <b>${esc(r.card.name)}</b> <span class="muted small">${esc(r.card.mana_cost)}</span></div>
@@ -130,14 +134,47 @@ async function renderStart() {
         ${r.themes.length ? `<p class="small">Beliebte Themen auf EDHREC: ${r.themes.map((t) => `<span class="badge">${esc(t.name)}</span>`).join(" ")}</p><p class="small muted">Frag dich: Welches Thema reizt dich am meisten – und warum?</p>` : ""}
         <a class="small" href="${esc(r.edhrec_url)}" target="_blank">Auf EDHREC ansehen ↗</a></div></div>`;
       if (!$("#sn").value) $("#sn").value = r.card.name.split(",")[0] + "-Deck";
+      renderPairInfo(r);
     } catch (e) { $("#sinfo").innerHTML = `<p class="problem small">${esc(e.message)}</p>`; }
   };
   $("#slook").onclick = look;
+  $("#splook").onclick = look;
   if (p.commander) look();
   $("#sgo").onclick = (e) => busy(e.target, async () => {
-    const r = await api("/api/wizard/start", { method: "POST", body: { name: $("#sn").value || "Neues Deck", commander: $("#sc").value, bracket: +$("#sb").value, budget_eur: +$("#sbu").value, archetype: $("#sa").value || null } });
+    const r = await api("/api/wizard/start", { method: "POST", body: { name: $("#sn").value || "Neues Deck", commander: $("#sc").value, partner: $("#sp").value || null, bracket: +$("#sb").value, budget_eur: +$("#sbu").value, archetype: $("#sa").value || null } });
     location.hash = "wiz-" + r.id;
   });
+}
+
+// ---------- Zwei Commander ----------
+async function renderPairInfo(r) {
+  const box = $("#pinfo");
+  let html = `<p class="small">${gloss(r.pair_info.text)}</p>`;
+  if (r.pair) {
+    html += `<p class="small ${r.pair.ok ? "" : "problem"}">${r.pair.ok ? "✅" : "⛔"} ${esc(r.pair.why)}${r.pair.ok ? ` · Gemeinsame Farbidentität: ${pips(r.pair.color_identity)}` : ""}</p>`;
+    if (r.partner_card) html += `<p class="small muted">${esc(r.partner_card.name)}: ${esc(r.partner_card.oracle_text)}</p>`;
+    if (r.pair.ok && !r.edhrec_pair_page) html += '<p class="small muted">Für dieses Paar gibt es keine eigene EDHREC-Seite – ich nutze die Daten des ersten Commanders.</p>';
+  }
+  box.innerHTML = html;
+  if (r.pair_info.type && !r.pair) {
+    box.insertAdjacentHTML("beforeend", '<div id="plist" class="small muted">Suche passende Partner …</div>');
+    const res = await api("/api/partners?name=" + encodeURIComponent(r.card.name)).catch(() => ({ candidates: [] }));
+    $("#plist").outerHTML = partnerList(res.candidates, "sp");
+    bindPartnerList((name) => { $("#sp").value = name; $("#splook").click(); });
+  }
+}
+
+function partnerList(cands, _target) {
+  if (!cands.length) return '<p class="small muted">Keine passenden Partner gefunden.</p>';
+  return `<div class="small"><b>Mögliche Zweit-Commander</b> <span class="muted">(deine zuerst, dann nach Beliebtheit)</span></div>
+    ${cands.slice(0, 15).map((c) => `<div class="cand"><div class="row"><span class="name" data-img="${esc(c.image)}">${esc(c.name)}</span>${pips(c.color_identity)}<span class="small muted">→ zusammen ${pips(c.combined_identity)}</span><span class="spacer"></span>
+      ${c.owned ? '<span class="badge good">besitzt du</span>' : `<span class="badge">${eur(c.eur)}</span>`}<button class="mini" data-partner="${esc(c.name)}">wählen</button></div>
+      <details><summary class="small muted">Kartentext</summary><p class="small">${esc(c.type_line)}<br>${esc(c.text)}</p></details></div>`).join("")}`;
+}
+
+function bindPartnerList(onPick) {
+  view.querySelectorAll("[data-img]").forEach((el) => (el.onclick = () => preview(el.dataset.img)));
+  view.querySelectorAll("[data-partner]").forEach((b) => (b.onclick = () => onPick(b.dataset.partner, b)));
 }
 
 // ---------- Assistent ----------
@@ -261,19 +298,38 @@ const STEP_UI = {
       toast("Gespeichert");
     });
   },
-  commander(id, S) {
+  async commander(id, S) {
     const c = S.commander;
     if (!c) { $("#stepbody").innerHTML = '<p class="hint">Kein Commander gesetzt.</p>'; return; }
-    $("#stepbody").innerHTML = `<div class="panel"><div class="row" style="align-items:flex-start">${c.card.image_small ? `<img src="${esc(c.card.image_small)}" style="width:120px;border-radius:8px" onclick="preview('${esc(c.card.image)}')">` : ""}
-      <div style="flex:1;min-width:180px"><b>${esc(c.card.name)}</b> ${pips(c.card.color_identity)}<p class="small">${esc(c.card.oracle_text)}</p>
-      <p class="small">Manawert <b>${c.card.cmc}</b> → ${c.card.cmc >= 5 ? "teurer Commander: du brauchst genug Ramp, um ihn ab Zug 4 zu spielen." : "günstiger Commander: er kommt früh und treibt dein Spiel jede Runde an."}</p>
-      ${c.is_game_changer ? '<p class="hint small">Game Changer als Commander → erst ab Bracket 3.</p>' : ""}</div></div>
+    const one = (card) => `<div class="row" style="align-items:flex-start;margin-bottom:.6rem">${card.image_small ? `<img src="${esc(card.image_small)}" style="width:110px;border-radius:8px" onclick="preview('${esc(card.image)}')">` : ""}
+      <div style="flex:1;min-width:180px"><b>${esc(card.name)}</b> ${pips(card.color_identity)} <span class="small muted">MV ${card.cmc}</span><p class="small">${esc(card.oracle_text)}</p>
+      ${c.cards.length > 1 ? `<button class="mini" data-rmcmd="${esc(card.name)}">als Commander entfernen</button>` : ""}</div></div>`;
+    const mv = Math.max(...c.cards.map((x) => x.cmc || 0));
+    $("#stepbody").innerHTML = `<div class="panel">${c.cards.map(one).join("")}
+      ${c.pair ? `<p class="small ${c.pair.ok ? "" : "problem"}">${c.pair.ok ? "✅" : "⛔"} ${esc(c.pair.why)}</p>` : ""}
+      <p class="small">Manawert <b>${mv}</b> → ${mv >= 5 ? "teurer Commander: du brauchst genug Ramp, um ihn ab Zug 4 zu spielen." : "günstiger Commander: er kommt früh und treibt dein Spiel jede Runde an."}
+      ${c.cards.length > 1 ? " Bei zwei Commandern: Überleg, welchen du zuerst spielst – meist den billigeren, der das Spiel vorbereitet." : ""}</p>
+      ${c.is_game_changer ? '<p class="hint small">Game Changer als Commander → erst ab Bracket 3.</p>' : ""}
       ${c.themes.length ? `<h3>Wofür andere ihn spielen (EDHREC-Themen)</h3><p>${c.themes.map((t) => `<span class="badge">${esc(t.name)}${t.count ? " · " + t.count : ""}</span>`).join(" ")}</p>` : ""}
       <label>Archetyp für dieses Deck</label><select id="warch"><option value="">– offen –</option>${Object.entries(KNOW.archetypes).map(([k, a]) => `<option value="${k}" ${S.deck.archetype === k ? "selected" : ""}>${esc(a.name)}</option>`).join("")}</select>
-      <div id="aexp" class="small" style="margin-top:.4rem"></div></div>`;
+      <div id="aexp" class="small" style="margin-top:.4rem"></div></div>
+      <div class="panel" id="partnerbox"></div>`;
     const exp = () => { const a = KNOW.archetypes[$("#warch").value]; $("#aexp").innerHTML = a ? `${gloss(a.plan)} · Komplexität ${a.cx}/5` : ""; };
     $("#warch").onchange = async () => { exp(); await api(`/api/decks/${id}/meta`, { method: "PATCH", body: { archetype: $("#warch").value } }); toast("Archetyp gespeichert – Zielwerte angepasst"); };
     exp();
+    view.querySelectorAll("[data-rmcmd]").forEach((b) => (b.onclick = async () => { await api(`/api/decks/${id}/commander?name=${encodeURIComponent(b.dataset.rmcmd)}`, { method: "DELETE" }); renderWizard(id); }));
+    const pb = $("#partnerbox");
+    if (c.cards.length >= 2) { pb.innerHTML = `<h3 style="margin-top:0">Zwei Commander</h3><p class="small">${gloss(c.pair_info.text)}</p>`; return; }
+    if (!c.pair_info.type) { pb.innerHTML = `<h3 style="margin-top:0">Zweiter Commander?</h3><p class="small">${esc(c.pair_info.text)}</p><p class="small muted">Zwei Commander gehen nur mit Partner, „Friends forever“, „Choose a Background“ oder „Doctor's companion“. Willst du das, brauchst du einen anderen Haupt-Commander.</p>`; return; }
+    pb.innerHTML = `<h3 style="margin-top:0">Zweiter Commander</h3><p class="small">${gloss(c.pair_info.text)}</p>
+      <p class="small muted">Frag dich: Welche Farben fehlen deinem Plan noch? Was soll der zweite Commander beitragen – Kartenvorteil, Schutz, eine zweite Siegchance?</p><div id="plist" class="small muted">Suche passende Partner …</div>`;
+    const res = await api("/api/partners?name=" + encodeURIComponent(c.card.name)).catch(() => ({ candidates: [] }));
+    $("#plist").outerHTML = partnerList(res.candidates);
+    bindPartnerList((name, b) => busy(b, async () => {
+      const r = await api(`/api/decks/${id}/commander`, { method: "POST", body: { name } });
+      toast(`${r.name} ist dein zweiter Commander – Farben jetzt: ${r.color_identity.join("")}`);
+      renderWizard(id);
+    }));
   },
   plan(id, S) {
     $("#stepbody").innerHTML = `<div class="panel"><label>Dein Spielplan in einem Satz</label>

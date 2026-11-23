@@ -142,6 +142,12 @@ def analyse(deck: dict, cards: list[dict], gc_set=None, archetype=None) -> dict:
         problems.append(f"Deck hat {total} Karten statt 100")
     if not commanders:
         problems.append("Kein Commander gesetzt")
+    elif len(commanders) > 2:
+        problems.append(f"{len(commanders)} Commander gesetzt – erlaubt sind höchstens 2")
+    elif len(commanders) == 2:
+        ok, why = K.pair_check(commanders[0], commanders[1])
+        if not ok:
+            problems.append(why)
 
     counts = {"lands": lands, **{k: len(v) for k, v in cats.items()}}
     advice = []
